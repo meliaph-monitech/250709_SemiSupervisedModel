@@ -1,113 +1,113 @@
-import zipfile
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import io
 import streamlit as st
-from scipy.signal import hilbert
-from scipy.fft import fft
-from scipy.stats import pearsonr
+import zipfile
+import os
+import io
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from scipy.signal import hilbert, welch
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
-st.title("Welding NOK Detection - Complete Pipeline")
+st.set_page_config(layout="wide")
+st.title("⚙️ Circular Welding NOK Detection (Feature-Based)")
 
-# Sidebar inputs
+# Sidebar controls
 with st.sidebar:
     uploaded_zip = st.file_uploader("Upload ZIP containing CSV files", type="zip")
-    threshold_value = st.number_input("Threshold for segmentation:", value=0.5)
+    selected_threshold = st.number_input("Segmentation Threshold:", value=0.5)
+    segment_button = st.button("Segment Beads")
 
-if uploaded_zip:
-    with zipfile.ZipFile(uploaded_zip, "r") as z:
-        csv_files = [f for f in z.namelist() if f.endswith(".csv")]
+# Constants for FFT band extraction
+BANDS = [(100, 300), (300, 600), (600, 1200), (1200, 2400)]
+BAND_LABELS = [f"{b[0]}-{b[1]}Hz" for b in BANDS]
+UNIFORM_FREQS = np.linspace(0, 2500, 100)
+
+# Suspected NOK beads
+suspected_NOK = {
+    "RH_250418_000001_All_68P_RH_01,02NG.csv": [1, 2],
+    "RH_250421_160001_TypeA_68p_Gap_Bead67_68NG": [67, 68],
+    "LH_250424_123949_LH_A_64P_ALL_47NG": [47]
+}
+
+# Feature extraction function
+def extract_features(signal, fs=5000):
+    analytic_signal = hilbert(signal)
+    envelope = np.abs(analytic_signal)
+    mean_env = np.mean(envelope)
+    std_env = np.std(envelope)
+    freqs, psd = welch(signal, fs=fs, nperseg=1024)
+    band_energies = []
+    for start, end in BANDS:
+        mask = (freqs >= start) & (freqs < end)
+        energy = np.mean(psd[mask]) if np.any(mask) else 0
+        band_energies.append(energy)
+    interp_fft = np.interp(UNIFORM_FREQS, freqs, psd, left=psd[0], right=psd[-1])
+    return [mean_env, std_env] + band_energies + interp_fft.tolist()
+
+if uploaded_zip and segment_button:
+    with zipfile.ZipFile(uploaded_zip, 'r') as z:
+        csv_files = [f for f in z.namelist() if f.endswith('.csv')]
         example_df = pd.read_csv(z.open(csv_files[0]))
-        selected_column = st.sidebar.selectbox("Select filter column:", example_df.columns)
+        selected_column = st.sidebar.selectbox("Select Filter Column:", example_df.columns)
 
-        bead_lengths = {}
-        bead_signals = {}
-        suspected_NOK = {
-            "RH_250418_000001_All_68P_RH_01,02NG.csv": [1, 2],
-            "RH_250421_160001_TypeA_68p_Gap_Bead67_68NG": [67, 68],
-            "LH_250424_123949_LH_A_64P_ALL_47NG": [47]
-        }
-
+        features = []
+        labels = []
+        files = []
+        bead_numbers = []
         for file in csv_files:
             df = pd.read_csv(z.open(file))
             signal = df[selected_column].to_numpy()
             segments = []
             i = 0
             while i < len(signal):
-                if signal[i] > threshold_value:
+                if signal[i] > selected_threshold:
                     start = i
-                    while i < len(signal) and signal[i] > threshold_value:
+                    while i < len(signal) and signal[i] > selected_threshold:
                         i += 1
                     end = i
-                    segments.append((start, end))
+                    segments.append(signal[start:end])
                 i += 1
-            bead_lengths[file] = [end - start for start, end in segments]
-            bead_signals[file] = [signal[start:end] for start, end in segments]
+            for idx, seg in enumerate(segments):
+                feat = extract_features(seg)
+                features.append(feat)
+                bead_num = idx + 1
+                files.append(file)
+                bead_numbers.append(bead_num)
+                if file in suspected_NOK and bead_num in suspected_NOK[file]:
+                    labels.append("NOK")
+                else:
+                    labels.append("OK")
 
-        max_beads = max(len(v) for v in bead_lengths.values())
-        heatmap_df = pd.DataFrame(index=csv_files, columns=[f"Bead {i+1}" for i in range(max_beads)])
-        for file, lengths in bead_lengths.items():
-            for idx, length in enumerate(lengths):
-                heatmap_df.loc[file, f"Bead {idx+1}"] = length
+        X = np.array(features)
+        y = np.array(labels)
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
 
-        st.subheader("Bead Length Heatmap")
-        plt.figure(figsize=(min(20, max_beads * 0.5), max(5, len(csv_files) * 0.5)))
-        sns.heatmap(heatmap_df.fillna(0).astype(float), annot=True, fmt=".0f", cmap="viridis")
-        st.pyplot(plt)
+        st.subheader("🔍 PCA Visualization")
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X_scaled)
+        pca_df = pd.DataFrame(X_pca, columns=["PC1", "PC2"])
+        pca_df["Label"] = y
+        pca_df["File"] = files
+        pca_df["Bead"] = bead_numbers
+        fig = px.scatter(pca_df, x="PC1", y="PC2", color="Label", hover_data=["File", "Bead"])
+        st.plotly_chart(fig, use_container_width=True)
 
-        st.success("Bead segmentation consistency check complete.")
+        st.subheader("🤖 Training RandomForest Classifier")
+        clf = RandomForestClassifier(n_estimators=100, random_state=42)
+        clf.fit(X_scaled, y)
+        preds = clf.predict(X_scaled)
+        pca_df["Prediction"] = preds
+        pca_df["Match"] = pca_df["Label"] == pca_df["Prediction"]
 
-        # Reference Median + Correlation/RMSE Calculation
-        st.subheader("Bead Correlation and RMSE NOK Detection")
-        scores = []
-        for bead_idx in range(max_beads):
-            bead_name = f"Bead {bead_idx+1}"
-            reference_signals = []
-            for file in csv_files:
-                suspected = suspected_NOK.get(file, [])
-                if (bead_idx+1) not in suspected and bead_idx < len(bead_signals[file]):
-                    reference_signals.append(bead_signals[file][bead_idx])
-            if not reference_signals:
-                continue
-            min_length = min(len(s) for s in reference_signals)
-            aligned_refs = np.array([s[:min_length] for s in reference_signals])
-            median_ref = np.median(aligned_refs, axis=0)
-            for file in csv_files:
-                if bead_idx < len(bead_signals[file]):
-                    signal = bead_signals[file][bead_idx][:min_length]
-                    corr = pearsonr(signal, median_ref)[0]
-                    rmse = np.sqrt(np.mean((signal - median_ref)**2))
-                    scores.append({
-                        "File": file,
-                        "Bead": bead_idx+1,
-                        "Correlation": corr,
-                        "RMSE": rmse
-                    })
-        score_df = pd.DataFrame(scores).sort_values(by=["Correlation", "RMSE"], ascending=[True, False])
-        st.dataframe(score_df)
+        st.write("### 📈 NOK Candidate Ranking")
+        nok_candidates = pca_df[(pca_df["Prediction"] == "NOK") & (pca_df["Label"] == "OK")]
+        nok_candidates_sorted = nok_candidates.sort_values(by=["PC1", "PC2"])
+        st.dataframe(nok_candidates_sorted[["File", "Bead", "PC1", "PC2"]])
 
-        st.info("Click a row to view bead signal vs. reference for manual inspection.")
-        selected = st.selectbox("Select row to inspect:", score_df.index)
-        if selected is not None:
-            row = score_df.loc[selected]
-            file = row["File"]
-            bead_idx = int(row["Bead"]) - 1
-            reference_signals = []
-            for f in csv_files:
-                suspected = suspected_NOK.get(f, [])
-                if (bead_idx+1) not in suspected and bead_idx < len(bead_signals[f]):
-                    reference_signals.append(bead_signals[f][bead_idx])
-            min_length = min(len(s) for s in reference_signals)
-            aligned_refs = np.array([s[:min_length] for s in reference_signals])
-            median_ref = np.median(aligned_refs, axis=0)
-            signal = bead_signals[file][bead_idx][:min_length]
-            plt.figure(figsize=(10, 4))
-            plt.plot(signal, label="Selected Bead")
-            plt.plot(median_ref, label="Reference Median", linestyle="--")
-            plt.title(f"{file} - Bead {bead_idx+1}")
-            plt.legend()
-            st.pyplot(plt)
+        csv_export = nok_candidates_sorted.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download NOK Candidates CSV", csv_export, "nok_candidates.csv", mime="text/csv")
 
-        st.success("Complete pipeline executed with NOK detection ready for review.")
+        st.success("✅ Analysis Complete. Use NOK candidates for human review and dataset refinement.")
