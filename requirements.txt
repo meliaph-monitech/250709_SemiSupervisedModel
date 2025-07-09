@@ -7,3 +7,5 @@ zipfile
 os
 matplotlib.pyplot
 io
+seaborn
+scipy
