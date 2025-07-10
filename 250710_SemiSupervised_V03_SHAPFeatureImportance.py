@@ -69,20 +69,23 @@ if uploaded_zip:
             segments = segment_beads(df, column, threshold)
             beads_data[filename] = {bead_number: df.iloc[start:end + 1] for bead_number, (start, end) in enumerate(segments, start=1)}
         st.session_state.beads_data = beads_data
+        st.session_state.lock_heatmap = True
         st.success("Bead segmentation completed and dataset locked.")
 
     if "beads_data" in st.session_state:
         beads_data = st.session_state.beads_data
-        max_beads = max(max(beads.keys()) for beads in beads_data.values())
-        heatmap_data = pd.DataFrame(0, index=file_list, columns=list(range(1, max_beads + 1)))
-        for filename, beads in beads_data.items():
-            for bead_number, df_bead in beads.items():
-                heatmap_data.loc[filename, bead_number] = len(df_bead)
 
-        st.subheader("📊 Bead Data Count Heatmap")
-        fig, ax = plt.subplots(figsize=(18, 6))
-        sns.heatmap(heatmap_data, cmap="viridis", annot=True, fmt="d", ax=ax)
-        st.pyplot(fig)
+        if "lock_heatmap" in st.session_state:
+            max_beads = max(max(beads.keys()) for beads in beads_data.values())
+            heatmap_data = pd.DataFrame(0, index=file_list, columns=list(range(1, max_beads + 1)))
+            for filename, beads in beads_data.items():
+                for bead_number, df_bead in beads.items():
+                    heatmap_data.loc[filename, bead_number] = len(df_bead)
+
+            st.subheader("📊 Bead Data Count Heatmap (Locked)")
+            fig, ax = plt.subplots(figsize=(18, 6))
+            sns.heatmap(heatmap_data, cmap="viridis", annot=True, fmt="d", ax=ax)
+            st.pyplot(fig)
 
         with st.sidebar:
             bead_to_plot = st.number_input("Select Bead Number to visualize:", min_value=1, max_value=max_beads, value=1)
@@ -152,9 +155,9 @@ if uploaded_zip:
                 shap_values = explainer(X)
                 st.write(f"#### SHAP Summary for {model_name}")
                 try:
-                    fig_shap = plt.figure()  # fallback
-                    shap.plots.beeswarm(shap_values, show=False)
+                    fig_shap, ax_shap = plt.subplots(figsize=(10,6))
+                    shap.summary_plot(shap_values.values, X, feature_names=["mean","std","min","max","median","q25","q75"], show=False)
                     st.pyplot(fig_shap)
                 except Exception as e:
-                    st.warning(f"SHAP beeswarm could not be generated: {e}")
+                    st.warning(f"SHAP summary plot could not be generated: {e}")
                 st.success(f"{model_name} training and SHAP analysis completed.")
