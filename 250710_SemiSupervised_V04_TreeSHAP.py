@@ -7,19 +7,20 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import plotly.graph_objs as go
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from sklearn.model_selection import GroupKFold, cross_val_predict
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from scipy.stats import skew, kurtosis, entropy
+from scipy.signal import find_peaks, welch
 import shap
 import tempfile
 import os
 
-st.set_page_config(page_title="Welding NOK Detection", layout="wide")
-st.title("⚡ Welding NOK Detection Streamlit App")
+st.set_page_config(page_title="Welding NOK Feature Exploration", layout="wide")
+st.title("⚡ Welding NOK Feature Exploration with SHAP")
 
 with st.sidebar:
-    uploaded_zip = st.file_uploader("Upload ZIP containing the three CSV files", type="zip")
+    uploaded_zip = st.file_uploader("Upload ZIP containing your CSV files", type="zip")
 
 if uploaded_zip:
     with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
@@ -47,8 +48,7 @@ if uploaded_zip:
         segment_button = st.button("Segment Beads")
 
     def segment_beads(df, column, threshold):
-        start_indices = []
-        end_indices = []
+        start_indices, end_indices = [], []
         signal = df[column].to_numpy()
         i = 0
         while i < len(signal):
@@ -69,96 +69,103 @@ if uploaded_zip:
             segments = segment_beads(df, column, threshold)
             beads_data[filename] = {bead_number: df.iloc[start:end + 1] for bead_number, (start, end) in enumerate(segments, start=1)}
         st.session_state.beads_data = beads_data
-        st.session_state.lock_heatmap = True
         st.session_state.max_beads = max(max(beads.keys()) for beads in beads_data.values())
-        st.success("Bead segmentation completed and dataset locked.")
+        st.success("Bead segmentation completed and locked.")
 
-    if "beads_data" in st.session_state and "max_beads" in st.session_state:
+    if "beads_data" in st.session_state:
         beads_data = st.session_state.beads_data
         max_beads = st.session_state.max_beads
 
-        if "lock_heatmap" in st.session_state:
-            heatmap_data = pd.DataFrame(0, index=file_list, columns=list(range(1, max_beads + 1)))
-            for filename, beads in beads_data.items():
-                for bead_number, df_bead in beads.items():
-                    heatmap_data.loc[filename, bead_number] = len(df_bead)
-
-            st.subheader("📊 Bead Data Count Heatmap (Locked)")
-            fig, ax = plt.subplots(figsize=(18, 6))
-            sns.heatmap(heatmap_data, cmap="viridis", annot=True, fmt="d", ax=ax)
-            st.pyplot(fig)
-
         with st.sidebar:
             bead_to_plot = st.number_input("Select Bead Number to visualize:", min_value=1, max_value=max_beads, value=1)
-            column_to_plot = st.selectbox("Select Column to Visualize:", first_df.columns)
+            column_to_plot = st.selectbox("Select Column to Visualize and Analyze:", first_df.columns)
 
         st.subheader(f"📈 Signal Overlay for Bead {bead_to_plot} - {column_to_plot}")
         fig_plotly = go.Figure()
-
         for filename, beads in beads_data.items():
             if bead_to_plot in beads:
-                df_bead = beads[bead_to_plot]
-                y = df_bead[column_to_plot].to_numpy()
+                y = beads[bead_to_plot][column_to_plot].to_numpy()
                 x = np.arange(len(y))
-                color = 'red' if (bead_to_plot in suspected_NOK.get(filename, [])) else None
+                color = 'red' if bead_to_plot in suspected_NOK.get(filename, []) else None
                 fig_plotly.add_trace(go.Scatter(y=y, x=x, mode='lines', name=filename, line=dict(color=color)))
-
-        fig_plotly.update_layout(height=600, xaxis_title="Index within Bead", yaxis_title=column_to_plot)
+        fig_plotly.update_layout(height=500, xaxis_title="Index", yaxis_title=column_to_plot)
         st.plotly_chart(fig_plotly, use_container_width=True)
 
         with st.sidebar:
-            model_choices = st.multiselect(
-                "Select models to train:",
-                ["Random Forest", "XGBoost", "Logistic Regression"],
-                default=["Random Forest", "XGBoost"]
-            )
-            train_button = st.button("Train Models")
+            train_button = st.button("Extract Features, Train Models, and Analyze")
 
         if train_button:
+            st.info("Feature extraction and model training in progress...")
+            def extract_features(signal, fs=1000):
+                features = {}
+                features['mean'] = np.mean(signal)
+                features['std'] = np.std(signal)
+                features['min'] = np.min(signal)
+                features['max'] = np.max(signal)
+                features['median'] = np.median(signal)
+                features['q25'] = np.percentile(signal, 25)
+                features['q75'] = np.percentile(signal, 75)
+                features['rms'] = np.sqrt(np.mean(signal**2))
+                features['skew'] = skew(signal)
+                features['kurtosis'] = kurtosis(signal)
+                features['energy'] = np.sum(signal**2)
+                features['entropy'] = entropy(np.histogram(signal, bins=20, density=True)[0]+1e-6)
+                peaks, _ = find_peaks(signal)
+                features['peak_count'] = len(peaks)
+                features['valley_count'] = len(find_peaks(-signal)[0])
+                features['zero_cross'] = ((signal[:-1] * signal[1:]) < 0).sum()
+                slope = np.diff(signal)
+                features['mean_slope'] = np.mean(slope)
+                features['max_slope'] = np.max(slope)
+                features['slope_std'] = np.std(slope)
+                f, Pxx = welch(signal, fs=fs)
+                features['dom_freq'] = f[np.argmax(Pxx)]
+                features['spec_centroid'] = np.sum(f * Pxx) / np.sum(Pxx)
+                features['spec_bw'] = np.sqrt(np.sum(((f - features['spec_centroid'])**2) * Pxx) / np.sum(Pxx))
+                band_limits = [(0,50), (50,200), (200,500)]
+                for idx, (low, high) in enumerate(band_limits):
+                    mask = (f >= low) & (f < high)
+                    features[f'bandpower_{idx}'] = np.sum(Pxx[mask])
+                features['total_power'] = np.sum(Pxx)
+                features['auc'] = np.trapz(np.abs(signal))
+                return features
+
             X, y, groups = [], [], []
             for filename, beads in beads_data.items():
                 for bead_number, df_bead in beads.items():
                     signal = df_bead[column_to_plot].to_numpy()
-                    feature_vector = [
-                        np.mean(signal), np.std(signal), np.min(signal), np.max(signal), np.median(signal),
-                        np.percentile(signal, 25), np.percentile(signal, 75)
-                    ]
-                    X.append(feature_vector)
-                    y.append(1 if (bead_number in suspected_NOK.get(filename, [])) else 0)
+                    features = extract_features(signal)
+                    X.append(list(features.values()))
+                    y.append(1 if bead_number in suspected_NOK.get(filename, []) else 0)
                     groups.append(filename)
 
+            feature_names = list(features.keys())
             X = np.array(X)
             y = np.array(y)
-            groups = np.array(groups)
 
-            models = {}
-            if "Random Forest" in model_choices:
-                models['Random Forest'] = RandomForestClassifier(class_weight='balanced', random_state=42)
-            if "XGBoost" in model_choices:
-                models['XGBoost'] = XGBClassifier(scale_pos_weight=(sum(y==0)/sum(y==1)), use_label_encoder=False, eval_metric='logloss', random_state=42)
-            if "Logistic Regression" in model_choices:
-                models['Logistic Regression'] = LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42)
+            models = {
+                'Random Forest': RandomForestClassifier(class_weight='balanced', random_state=42),
+                'XGBoost': XGBClassifier(scale_pos_weight=(sum(y==0)/max(sum(y==1),1)), use_label_encoder=False, eval_metric='logloss', random_state=42)
+            }
 
-            st.info("Training in progress...")
             gkf = GroupKFold(n_splits=3)
             for model_name, model in models.items():
                 preds = cross_val_predict(model, X, y, groups=groups, cv=gkf, method='predict')
-                proba = cross_val_predict(model, X, y, groups=groups, cv=gkf, method='predict_proba')[:, 1]
-                st.write(f"### {model_name} Results")
-                st.text(classification_report(y, preds, target_names=["OK", "NOK"]))
+                st.subheader(f"📊 {model_name} Results")
+                st.text(classification_report(y, preds, target_names=["OK","NOK"]))
                 cm = confusion_matrix(y, preds)
-                disp = ConfusionMatrixDisplay(cm, display_labels=["OK", "NOK"])
+                disp = ConfusionMatrixDisplay(cm, display_labels=["OK","NOK"])
                 fig_cm, ax_cm = plt.subplots()
                 disp.plot(ax=ax_cm)
                 st.pyplot(fig_cm)
                 model.fit(X, y)
-                explainer = shap.Explainer(model, X)
-                shap_values = explainer(X)
-                st.write(f"#### SHAP Summary for {model_name}")
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(X)
+                st.write(f"#### SHAP Feature Importance for {model_name}")
                 try:
-                    fig_shap, ax_shap = plt.subplots(figsize=(10,6))
-                    shap.summary_plot(shap_values.values, X, feature_names=["mean","std","min","max","median","q25","q75"], show=False)
+                    fig_shap, ax_shap = plt.subplots(figsize=(12,8))
+                    shap.summary_plot(shap_values, X, feature_names=feature_names, show=False)
                     st.pyplot(fig_shap)
                 except Exception as e:
-                    st.warning(f"SHAP summary plot could not be generated: {e}")
-                st.success(f"{model_name} training and SHAP analysis completed.")
+                    st.warning(f"SHAP could not be displayed: {e}")
+            st.success("Feature extraction, model training, and SHAP analysis completed.")
