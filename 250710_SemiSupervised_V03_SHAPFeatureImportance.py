@@ -18,8 +18,8 @@ import os
 st.set_page_config(page_title="Welding NOK Detection", layout="wide")
 st.title("⚡ Welding NOK Detection Streamlit App")
 
-# --- Step 1: ZIP uploader ---
-uploaded_zip = st.file_uploader("Upload ZIP containing the three CSV files", type="zip")
+with st.sidebar:
+    uploaded_zip = st.file_uploader("Upload ZIP containing the three CSV files", type="zip")
 
 if uploaded_zip:
     with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
@@ -40,12 +40,12 @@ if uploaded_zip:
         "LH_250424_123949_LH_A_64P_ALL_47NG": [47]
     }
 
-    # Step 2: Column selection and threshold input
     first_df = next(iter(dataframes.values()))
-    column = st.sidebar.selectbox("Select filter column for bead segmentation:", first_df.columns)
-    threshold = st.sidebar.number_input("Enter threshold for bead segmentation:", value=0.0)
+    with st.sidebar:
+        column = st.selectbox("Select filter column for bead segmentation:", first_df.columns)
+        threshold = st.number_input("Enter threshold for bead segmentation:", value=0.0)
+        segment_button = st.button("Segment Beads")
 
-    # Step 3: Bead segmentation
     def segment_beads(df, column, threshold):
         start_indices = []
         end_indices = []
@@ -63,7 +63,7 @@ if uploaded_zip:
                 i += 1
         return list(zip(start_indices, end_indices))
 
-    if st.button("Segment Beads"):
+    if segment_button:
         beads_data = {}
         for filename, df in dataframes.items():
             segments = segment_beads(df, column, threshold)
@@ -73,8 +73,6 @@ if uploaded_zip:
 
     if "beads_data" in st.session_state:
         beads_data = st.session_state.beads_data
-
-        # Step 4: Heatmap
         max_beads = max(max(beads.keys()) for beads in beads_data.values())
         heatmap_data = pd.DataFrame(0, index=file_list, columns=list(range(1, max_beads + 1)))
         for filename, beads in beads_data.items():
@@ -86,36 +84,37 @@ if uploaded_zip:
         sns.heatmap(heatmap_data, cmap="viridis", annot=True, fmt="d", ax=ax)
         st.pyplot(fig)
 
-        # Step 5/6: Plotly signal overlay per bead
-        bead_to_plot = st.sidebar.number_input("Select Bead Number to visualize:", min_value=1, max_value=max_beads, value=1)
-        st.subheader(f"📈 Signal Overlay for Bead {bead_to_plot}")
+        with st.sidebar:
+            bead_to_plot = st.number_input("Select Bead Number to visualize:", min_value=1, max_value=max_beads, value=1)
+            column_to_plot = st.selectbox("Select Column to Visualize:", first_df.columns)
+
+        st.subheader(f"📈 Signal Overlay for Bead {bead_to_plot} - {column_to_plot}")
         fig_plotly = go.Figure()
 
         for filename, beads in beads_data.items():
             if bead_to_plot in beads:
                 df_bead = beads[bead_to_plot]
-                y = df_bead[column].to_numpy()
+                y = df_bead[column_to_plot].to_numpy()
                 x = np.arange(len(y))
                 color = 'red' if (bead_to_plot in suspected_NOK.get(filename, [])) else None
                 fig_plotly.add_trace(go.Scatter(y=y, x=x, mode='lines', name=filename, line=dict(color=color)))
 
-        fig_plotly.update_layout(height=600, xaxis_title="Index within Bead", yaxis_title=column)
+        fig_plotly.update_layout(height=600, xaxis_title="Index within Bead", yaxis_title=column_to_plot)
         st.plotly_chart(fig_plotly, use_container_width=True)
 
-        # Step 8: Model Training Selection
-        st.subheader("🧩 Model Training")
-        model_choices = st.multiselect(
-            "Select models to train:",
-            ["Random Forest", "XGBoost", "Logistic Regression"],
-            default=["Random Forest", "XGBoost"]
-        )
+        with st.sidebar:
+            model_choices = st.multiselect(
+                "Select models to train:",
+                ["Random Forest", "XGBoost", "Logistic Regression"],
+                default=["Random Forest", "XGBoost"]
+            )
+            train_button = st.button("Train Models")
 
-        if st.button("Train Models"):
-            # Feature extraction: simple example features
+        if train_button:
             X, y, groups = [], [], []
             for filename, beads in beads_data.items():
                 for bead_number, df_bead in beads.items():
-                    signal = df_bead[column].to_numpy()
+                    signal = df_bead[column_to_plot].to_numpy()
                     feature_vector = [
                         np.mean(signal), np.std(signal), np.min(signal), np.max(signal), np.median(signal),
                         np.percentile(signal, 25), np.percentile(signal, 75)
@@ -137,29 +136,25 @@ if uploaded_zip:
                 models['Logistic Regression'] = LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42)
 
             st.info("Training in progress...")
-
             gkf = GroupKFold(n_splits=3)
             for model_name, model in models.items():
                 preds = cross_val_predict(model, X, y, groups=groups, cv=gkf, method='predict')
                 proba = cross_val_predict(model, X, y, groups=groups, cv=gkf, method='predict_proba')[:, 1]
-
                 st.write(f"### {model_name} Results")
                 st.text(classification_report(y, preds, target_names=["OK", "NOK"]))
-
                 cm = confusion_matrix(y, preds)
                 disp = ConfusionMatrixDisplay(cm, display_labels=["OK", "NOK"])
                 fig_cm, ax_cm = plt.subplots()
                 disp.plot(ax=ax_cm)
                 st.pyplot(fig_cm)
-
-                # SHAP analysis
                 model.fit(X, y)
                 explainer = shap.Explainer(model, X)
                 shap_values = explainer(X)
                 st.write(f"#### SHAP Summary for {model_name}")
-                fig_shap = shap.plots.beeswarm(shap_values, show=False)
-                st.pyplot(fig_shap)
-
+                try:
+                    fig_shap = plt.figure()  # fallback
+                    shap.plots.beeswarm(shap_values, show=False)
+                    st.pyplot(fig_shap)
+                except Exception as e:
+                    st.warning(f"SHAP beeswarm could not be generated: {e}")
                 st.success(f"{model_name} training and SHAP analysis completed.")
-
-st.caption("🚀 Fully completed pipeline for bead-based NOK detection ready for your dataset workflow.")
