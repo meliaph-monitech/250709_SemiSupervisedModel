@@ -70,13 +70,14 @@ if uploaded_zip:
             beads_data[filename] = {bead_number: df.iloc[start:end + 1] for bead_number, (start, end) in enumerate(segments, start=1)}
         st.session_state.beads_data = beads_data
         st.session_state.lock_heatmap = True
+        st.session_state.max_beads = max(max(beads.keys()) for beads in beads_data.values())
         st.success("Bead segmentation completed and dataset locked.")
 
-    if "beads_data" in st.session_state:
+    if "beads_data" in st.session_state and "max_beads" in st.session_state:
         beads_data = st.session_state.beads_data
+        max_beads = st.session_state.max_beads
 
         if "lock_heatmap" in st.session_state:
-            max_beads = max(max(beads.keys()) for beads in beads_data.values())
             heatmap_data = pd.DataFrame(0, index=file_list, columns=list(range(1, max_beads + 1)))
             for filename, beads in beads_data.items():
                 for bead_number, df_bead in beads.items():
