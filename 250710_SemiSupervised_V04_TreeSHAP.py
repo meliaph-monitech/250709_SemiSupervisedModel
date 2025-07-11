@@ -37,8 +37,8 @@ if uploaded_zip:
 
     suspected_NOK = {
         "RH_250418_000001_All_68P_RH_01,02NG.csv": [1, 2],
-        "RH_250421_160001_TypeA_68p_Gap_Bead67_68NG": [67, 68],
-        "LH_250424_123949_LH_A_64P_ALL_47NG": [47]
+        "RH_250421_160001_TypeA_68p_Gap_Bead67_68NG.csv": [67, 68],
+        "LH_250424_123949_LH_A_64P_ALL_47NG.csv": [47]
     }
 
     first_df = next(iter(dataframes.values()))
